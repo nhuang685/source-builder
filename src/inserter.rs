@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::fold::Fold;
-use syn::{Ident, ItemUse, PathSegment, UsePath, UseTree, fold};
+use syn::{Ident, Item, ItemUse, PathSegment, UsePath, UseTree, fold};
 
 struct SourceVisitor<'a> {
     library_name: &'a str,
@@ -70,6 +70,14 @@ impl Fold for LibraryVisitor<'_> {
             );
         }
         fold::fold_path(self, i)
+    }
+
+    fn fold_file(&mut self, mut i: syn::File) -> syn::File {
+        i.items.retain(|item| match item {
+            Item::Mod(m) => m.content.is_some(),
+            _ => true,
+        });
+        fold::fold_file(self, i)
     }
 }
 
