@@ -1,0 +1,11 @@
+[package]
+name = "source-builder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+syn = { version = "3", features = ["extra-traits", "fold", "full", "visit"] }
+clap = { version = "4", features = ["derive"] }
+walkdir = "2.5.0"
+anyhow = "1.0.104"
+prettyplease = "0.3.0"
