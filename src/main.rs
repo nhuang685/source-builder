@@ -24,6 +24,7 @@ fn main() -> Result<(), anyhow::Error> {
         path: library_path,
         output,
     } = cli;
+    let library_path = library_path.join("src");
 
     // step 1: precompute macro file map
     let macro_file_map = macro_finder::precompute_macro_file_map(&library_path)?;

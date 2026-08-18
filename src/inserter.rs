@@ -105,7 +105,7 @@ pub fn gen_file(
     content += &format!("pub mod {library_name} {{");
     let mut pre = Vec::new();
     for file in files {
-        let mods = get_module_path(&file, &library_path)?;
+        let mods = get_module_path(&file, library_path)?;
         let cut = pre
             .iter()
             .zip(&mods)
