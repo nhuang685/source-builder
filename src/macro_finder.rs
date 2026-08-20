@@ -1,5 +1,5 @@
+use crate::utils::parse_file;
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 use syn::{Ident, ItemMacro, visit};
@@ -32,7 +32,7 @@ pub fn precompute_macro_file_map(root: &PathBuf) -> Result<HashMap<Ident, PathBu
         if !entry.path().extension().is_some_and(|s| s == "rs") {
             continue;
         }
-        let contents = syn::parse_file(fs::read_to_string(entry.path())?.as_str())?;
+        let contents = parse_file(entry.path())?;
         MacroFinder::new(entry.path(), &mut map).visit_file(&contents);
     }
     Ok(map)

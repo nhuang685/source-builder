@@ -1,9 +1,58 @@
+use crate::utils::parse_file;
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use syn::fold::Fold;
 use syn::spanned::Spanned;
 use syn::{Ident, Item, ItemUse, PathSegment, UsePath, UseTree, fold};
+
+fn is_macro_use_tree(i: &UseTree, macro_file_map: &HashMap<Ident, PathBuf>) -> bool {
+    match i {
+        UseTree::Name(n) => macro_file_map.contains_key(&n.ident),
+        UseTree::Rename(r) => macro_file_map.contains_key(&r.ident),
+        UseTree::Group(g) => {
+            let mut res = None;
+            for item in &g.items {
+                let cur = match item {
+                    UseTree::Name(n) => macro_file_map.contains_key(&n.ident),
+                    UseTree::Rename(r) => macro_file_map.contains_key(&r.ident),
+                    _ => false,
+                };
+                assert!(
+                    res.is_none_or(|res| res == cur),
+                    "Can't have both macro and path in use statement"
+                );
+                res = Some(cur);
+            }
+            res.unwrap()
+        }
+        _ => false,
+    }
+}
+
+fn is_macro_item_use(
+    i: &ItemUse,
+    root_ident: &str,
+    macro_file_map: &HashMap<Ident, PathBuf>,
+) -> bool {
+    if let UseTree::Path(p) = &i.tree
+        && p.ident == root_ident
+    {
+        is_macro_use_tree(&p.tree, macro_file_map)
+    } else {
+        false
+    }
+}
+
+fn is_macro_path(
+    i: &syn::Path,
+    root_ident: &str,
+    macro_file_map: &HashMap<Ident, PathBuf>,
+) -> bool {
+    // must be of form library_name::macro
+    i.segments.len() == 2
+        && i.segments.first().unwrap().ident == root_ident
+        && macro_file_map.contains_key(&i.segments.last().unwrap().ident)
+}
 
 struct SourceVisitor<'a> {
     library_name: &'a str,
@@ -12,41 +61,10 @@ struct SourceVisitor<'a> {
 
 impl SourceVisitor<'_> {
     fn is_macro_item_use(&self, i: &ItemUse) -> bool {
-        if let UseTree::Path(p) = &i.tree
-            && p.ident == self.library_name
-        {
-            match &*p.tree {
-                UseTree::Name(n) => self.macro_file_map.contains_key(&n.ident),
-                UseTree::Rename(r) => self.macro_file_map.contains_key(&r.ident),
-                UseTree::Group(g) => {
-                    let mut res = None;
-                    for item in &g.items {
-                        let cur = match item {
-                            UseTree::Name(n) => self.macro_file_map.contains_key(&n.ident),
-                            UseTree::Rename(r) => self.macro_file_map.contains_key(&r.ident),
-                            _ => false,
-                        };
-                        assert!(
-                            res.is_none_or(|res| res == cur),
-                            "Can't have both macro and path in use statement"
-                        );
-                        res = Some(cur);
-                    }
-                    res.unwrap()
-                }
-                _ => false,
-            }
-        } else {
-            false
-        }
+        is_macro_item_use(i, self.library_name, self.macro_file_map)
     }
     fn is_macro_path(&self, i: &syn::Path) -> bool {
-        // must be of form library_name::macro
-        i.segments.len() == 2
-            && i.segments.first().unwrap().ident == self.library_name
-            && self
-                .macro_file_map
-                .contains_key(&i.segments.last().unwrap().ident)
+        is_macro_path(i, self.library_name, self.macro_file_map)
     }
 }
 
@@ -102,41 +120,10 @@ struct LibraryVisitor<'a> {
 
 impl LibraryVisitor<'_> {
     fn is_macro_item_use(&self, i: &ItemUse) -> bool {
-        if let UseTree::Path(p) = &i.tree
-            && p.ident == "crate"
-        {
-            match &*p.tree {
-                UseTree::Name(n) => self.macro_file_map.contains_key(&n.ident),
-                UseTree::Rename(r) => self.macro_file_map.contains_key(&r.ident),
-                UseTree::Group(g) => {
-                    let mut res = None;
-                    for item in &g.items {
-                        let cur = match item {
-                            UseTree::Name(n) => self.macro_file_map.contains_key(&n.ident),
-                            UseTree::Rename(r) => self.macro_file_map.contains_key(&r.ident),
-                            _ => false,
-                        };
-                        assert!(
-                            res.is_none_or(|res| res == cur),
-                            "Can't have both macro and path in use statement"
-                        );
-                        res = Some(cur);
-                    }
-                    res.unwrap()
-                }
-                _ => false,
-            }
-        } else {
-            false
-        }
+        is_macro_item_use(i, "crate", self.macro_file_map)
     }
     fn is_macro_path(&self, i: &syn::Path) -> bool {
-        // must be of form library_name::macro
-        i.segments.len() == 2
-            && i.segments.first().unwrap().ident == "crate"
-            && self
-                .macro_file_map
-                .contains_key(&i.segments.last().unwrap().ident)
+        is_macro_path(i, "crate", self.macro_file_map)
     }
 }
 
@@ -252,7 +239,7 @@ pub fn gen_file(
     let mut content = String::new();
 
     // insert source
-    let mut file = syn::parse_file(&fs::read_to_string(source)?)?;
+    let mut file = parse_file(source)?;
     file = SourceVisitor {
         library_name,
         macro_file_map,
@@ -277,7 +264,7 @@ pub fn gen_file(
         for module in &mods[cut..] {
             content += &format!("pub mod {module} {{");
         }
-        let mut src = syn::parse_file(&fs::read_to_string(file)?)?;
+        let mut src = parse_file(&file)?;
         src = LibraryVisitor {
             library_name,
             macro_file_map,
