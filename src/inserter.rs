@@ -32,7 +32,7 @@ impl SourceVisitor<'_> {
                         );
                         res = Some(cur);
                     }
-                    res.unwrap()
+                    res.unwrap_or(false)
                 }
                 _ => false,
             }
@@ -75,7 +75,11 @@ impl Fold for SourceVisitor<'_> {
         if self.is_macro_path(&i) {
             let sp = i.segments.first().unwrap().span();
             i.segments.first_mut().unwrap().ident = Ident::new("crate", sp);
-        } else if i.segments.first().unwrap().ident == self.library_name {
+        } else if i
+            .segments
+            .first()
+            .is_some_and(|s| s.ident == self.library_name)
+        {
             i.segments.insert(
                 0,
                 PathSegment {
@@ -122,7 +126,7 @@ impl LibraryVisitor<'_> {
                         );
                         res = Some(cur);
                     }
-                    res.unwrap()
+                    res.unwrap_or(false)
                 }
                 _ => false,
             }
@@ -161,7 +165,7 @@ impl Fold for LibraryVisitor<'_> {
     }
 
     fn fold_path(&mut self, mut i: syn::Path) -> syn::Path {
-        if !self.is_macro_path(&i) && i.segments.first().unwrap().ident == "crate" {
+        if !self.is_macro_path(&i) && i.segments.first().is_some_and(|s| s.ident == "crate") {
             i.segments.insert(
                 1,
                 PathSegment {
@@ -228,13 +232,13 @@ impl Fold for LibraryVisitor<'_> {
 }
 
 fn get_module_path(file: &Path, library_path: &Path) -> anyhow::Result<Vec<String>> {
-    if file.file_name().unwrap() == "lib.rs" {
+    if file.file_name().is_some_and(|name| name == "lib.rs") {
         return Ok(Vec::new());
     }
     // assume library file
     let mut file = file.strip_prefix(library_path)?.to_path_buf();
     file.set_extension("");
-    if file.file_name().unwrap() == "mod" {
+    if file.file_name().is_some_and(|name| name == "mod") {
         file.pop();
     }
     Ok(file
