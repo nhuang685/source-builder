@@ -39,7 +39,13 @@ fn main() -> Result<(), anyhow::Error> {
     files.insert(0, library_path.join("lib.rs"));
     dbg!(&files);
 
-    let content = inserter::gen_file(&source, &library_name, &library_path, files)?;
+    let content = inserter::gen_file(
+        &source,
+        &library_name,
+        &library_path,
+        files,
+        &macro_file_map,
+    )?;
     fs::File::create(output)?.write_all(content.as_bytes())?;
     Ok(())
 }
