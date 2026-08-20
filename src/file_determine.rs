@@ -1,3 +1,5 @@
+use crate::errors::Errors;
+use anyhow::{Context, anyhow, ensure};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::{fs, path};
@@ -6,6 +8,7 @@ use syn::visit::Visit;
 use syn::{Ident, ItemUse, Path, PathSegment, Token, UseTree, visit};
 
 struct Visitor<'a> {
+    pub errors: Errors,
     pub is_source: bool,
     pub queue: VecDeque<(PathBuf, bool)>,
     pub files: HashSet<PathBuf>,
@@ -63,7 +66,10 @@ impl Visitor<'_> {
                 self.add_mod(&path, &segment);
             }
             UseTree::Glob(_) => {
-                panic!("Can't use glob imports");
+                self.errors.push(anyhow!(
+                    "glob imports are not supported (in `{}`)",
+                    path.display()
+                ));
             }
             UseTree::Group(g) => {
                 for item in &g.items {
@@ -127,7 +133,20 @@ pub fn determine_files(
     library_path: &path::Path,
     macro_file_map: &HashMap<Ident, PathBuf>,
 ) -> anyhow::Result<HashSet<PathBuf>> {
+    ensure!(
+        source.is_file(),
+        "source file `{}` does not exist",
+        source.display()
+    );
+    let lib_root = library_path.join("lib.rs");
+    ensure!(
+        lib_root.is_file(),
+        "library root `{}` does not exist",
+        lib_root.display()
+    );
+
     let mut vis = Visitor {
+        errors: Errors::default(),
         is_source: true,
         queue: VecDeque::new(),
         files: HashSet::new(),
@@ -137,7 +156,7 @@ pub fn determine_files(
         macro_file_map,
     };
     vis.add_file(source.to_path_buf(), true);
-    vis.add_file(library_path.join("lib.rs"), false);
+    vis.add_file(lib_root.clone(), false);
     while let Some((file, is_source)) = vis.queue.pop_front() {
         if is_source {
             vis.is_source = true;
@@ -147,9 +166,14 @@ pub fn determine_files(
             vis.lib_rt = "crate";
         }
         vis.name_ref = HashMap::new();
-        vis.visit_file(&syn::parse_file(fs::read_to_string(file)?.as_str())?);
+        let contents = fs::read_to_string(&file)
+            .with_context(|| format!("failed to read `{}`", file.display()))?;
+        let ast = syn::parse_file(&contents)
+            .with_context(|| format!("failed to parse `{}`", file.display()))?;
+        vis.visit_file(&ast);
     }
+    vis.errors.into_result()?;
     vis.files.remove(source);
-    vis.files.remove(&library_path.join("lib.rs"));
+    vis.files.remove(&lib_root);
     Ok(vis.files)
 }

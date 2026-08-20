@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,14 +27,23 @@ impl<'ast> Visit<'ast> for MacroFinder<'_> {
 }
 
 pub fn precompute_macro_file_map(root: &PathBuf) -> Result<HashMap<Ident, PathBuf>, anyhow::Error> {
+    anyhow::ensure!(
+        root.is_dir(),
+        "library source directory `{}` does not exist",
+        root.display()
+    );
     let mut map = HashMap::new();
     for entry in WalkDir::new(root) {
-        let entry = entry?;
+        let entry = entry.with_context(|| format!("failed to walk `{}`", root.display()))?;
         if !entry.path().extension().is_some_and(|s| s == "rs") {
             continue;
         }
-        let contents = syn::parse_file(fs::read_to_string(entry.path())?.as_str())?;
-        MacroFinder::new(entry.path(), &mut map).visit_file(&contents);
+        let path = entry.path();
+        let source = fs::read_to_string(path)
+            .with_context(|| format!("failed to read `{}`", path.display()))?;
+        let contents = syn::parse_file(&source)
+            .with_context(|| format!("failed to parse `{}`", path.display()))?;
+        MacroFinder::new(path, &mut map).visit_file(&contents);
     }
     Ok(map)
 }
