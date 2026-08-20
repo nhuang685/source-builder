@@ -1,6 +1,7 @@
+use crate::utils::parse_file;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path;
 use std::path::PathBuf;
-use std::{fs, path};
 use syn::punctuated::Punctuated;
 use syn::visit::Visit;
 use syn::{Ident, ItemUse, Path, PathSegment, Token, UseTree, visit};
@@ -147,7 +148,7 @@ pub fn determine_files(
             vis.lib_rt = "crate";
         }
         vis.name_ref = HashMap::new();
-        vis.visit_file(&syn::parse_file(fs::read_to_string(file)?.as_str())?);
+        vis.visit_file(&parse_file(&file)?);
     }
     vis.files.remove(source);
     vis.files.remove(&library_path.join("lib.rs"));
