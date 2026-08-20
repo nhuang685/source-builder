@@ -23,7 +23,6 @@ impl Visitor<'_> {
         }
     }
     fn add_mod(&mut self, path: &path::Path, segment: &str) {
-        dbg!(path, segment);
         // two possible:
         // path/segment.rs
         // path/segment/mod.rs

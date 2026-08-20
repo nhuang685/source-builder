@@ -28,7 +28,6 @@ fn main() -> Result<(), anyhow::Error> {
 
     // step 1: precompute macro file map
     let macro_file_map = macro_finder::precompute_macro_file_map(&library_path)?;
-    dbg!(&macro_file_map);
 
     // step 2: find library files to include
     let mut files: Vec<PathBuf> =
@@ -37,7 +36,6 @@ fn main() -> Result<(), anyhow::Error> {
             .collect();
     files.sort();
     files.insert(0, library_path.join("lib.rs"));
-    dbg!(&files);
 
     let content = inserter::gen_file(
         &source,

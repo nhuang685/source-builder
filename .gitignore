@@ -4,4 +4,6 @@ source.rs
 test_algo_lib/
 test/
 .DS_Store
-oup.rs/
+oup.rs
+oup
+.idea/
