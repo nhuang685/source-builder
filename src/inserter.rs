@@ -1,3 +1,5 @@
+use crate::errors::Errors;
+use anyhow::{Context, anyhow, ensure};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5,39 +7,58 @@ use syn::fold::Fold;
 use syn::spanned::Spanned;
 use syn::{Ident, Item, ItemUse, PathSegment, UsePath, UseTree, fold};
 
+/// Whether a `use` group only imports macros, erroring when it mixes macro and
+/// non-macro imports (they need different rewrites) or when it is empty.
+fn is_macro_group(
+    items: &syn::punctuated::Punctuated<UseTree, syn::Token![,]>,
+    macro_file_map: &HashMap<Ident, PathBuf>,
+) -> anyhow::Result<bool> {
+    let mut res = None;
+    for item in items {
+        let cur = match item {
+            UseTree::Name(n) => macro_file_map.contains_key(&n.ident),
+            UseTree::Rename(r) => macro_file_map.contains_key(&r.ident),
+            _ => false,
+        };
+        ensure!(
+            res.is_none_or(|res| res == cur),
+            "can't have both macro and path in use statement"
+        );
+        res = Some(cur);
+    }
+    res.ok_or_else(|| anyhow!("empty use group is not supported"))
+}
+
 struct SourceVisitor<'a> {
     library_name: &'a str,
     macro_file_map: &'a HashMap<Ident, PathBuf>,
+    errors: Errors,
 }
 
 impl SourceVisitor<'_> {
-    fn is_macro_item_use(&self, i: &ItemUse) -> bool {
+    fn is_macro_item_use(&self, i: &ItemUse) -> anyhow::Result<bool> {
         if let UseTree::Path(p) = &i.tree
             && p.ident == self.library_name
         {
             match &*p.tree {
-                UseTree::Name(n) => self.macro_file_map.contains_key(&n.ident),
-                UseTree::Rename(r) => self.macro_file_map.contains_key(&r.ident),
-                UseTree::Group(g) => {
-                    let mut res = None;
-                    for item in &g.items {
-                        let cur = match item {
-                            UseTree::Name(n) => self.macro_file_map.contains_key(&n.ident),
-                            UseTree::Rename(r) => self.macro_file_map.contains_key(&r.ident),
-                            _ => false,
-                        };
-                        assert!(
-                            res.is_none_or(|res| res == cur),
-                            "Can't have both macro and path in use statement"
-                        );
-                        res = Some(cur);
-                    }
-                    res.unwrap()
-                }
-                _ => false,
+                UseTree::Name(n) => Ok(self.macro_file_map.contains_key(&n.ident)),
+                UseTree::Rename(r) => Ok(self.macro_file_map.contains_key(&r.ident)),
+                UseTree::Group(g) => is_macro_group(&g.items, self.macro_file_map),
+                _ => Ok(false),
             }
         } else {
-            false
+            Ok(false)
+        }
+    }
+    /// Same as [`Self::is_macro_item_use`], recording the error for later
+    /// propagation since `Fold` cannot return one.
+    fn is_macro_item_use_or_record(&mut self, i: &ItemUse) -> bool {
+        match self.is_macro_item_use(i) {
+            Ok(res) => res,
+            Err(err) => {
+                self.errors.push(err);
+                false
+            }
         }
     }
     fn is_macro_path(&self, i: &syn::Path) -> bool {
@@ -52,7 +73,7 @@ impl SourceVisitor<'_> {
 
 impl Fold for SourceVisitor<'_> {
     fn fold_item_use(&mut self, mut i: ItemUse) -> ItemUse {
-        if self.is_macro_item_use(&i)
+        if self.is_macro_item_use_or_record(&i)
             && let UseTree::Path(mut p) = i.tree
         {
             p.ident = Ident::new("crate", p.ident.span());
@@ -72,14 +93,20 @@ impl Fold for SourceVisitor<'_> {
         fold::fold_item_use(self, i)
     }
     fn fold_path(&mut self, mut i: syn::Path) -> syn::Path {
+        let Some(first) = i.segments.first() else {
+            return i;
+        };
         if self.is_macro_path(&i) {
-            let sp = i.segments.first().unwrap().span();
-            i.segments.first_mut().unwrap().ident = Ident::new("crate", sp);
-        } else if i.segments.first().unwrap().ident == self.library_name {
+            let sp = first.span();
+            if let Some(first) = i.segments.first_mut() {
+                first.ident = Ident::new("crate", sp);
+            }
+        } else if first.ident == self.library_name {
+            let sp = first.ident.span();
             i.segments.insert(
                 0,
                 PathSegment {
-                    ident: Ident::new("crate", i.segments[0].ident.span()),
+                    ident: Ident::new("crate", sp),
                     arguments: syn::PathArguments::None,
                 },
             );
@@ -87,10 +114,14 @@ impl Fold for SourceVisitor<'_> {
         fold::fold_path(self, i)
     }
     fn fold_file(&mut self, mut i: syn::File) -> syn::File {
-        i.items.retain(|item| match item {
-            Item::Use(item) => !self.is_macro_item_use(item),
-            _ => true,
-        });
+        let items = std::mem::take(&mut i.items);
+        i.items = items
+            .into_iter()
+            .filter(|item| match item {
+                Item::Use(item) => !self.is_macro_item_use_or_record(item),
+                _ => true,
+            })
+            .collect();
         fold::fold_file(self, i)
     }
 }
@@ -98,36 +129,33 @@ impl Fold for SourceVisitor<'_> {
 struct LibraryVisitor<'a> {
     library_name: &'a str,
     macro_file_map: &'a HashMap<Ident, PathBuf>,
+    errors: Errors,
 }
 
 impl LibraryVisitor<'_> {
-    fn is_macro_item_use(&self, i: &ItemUse) -> bool {
+    fn is_macro_item_use(&self, i: &ItemUse) -> anyhow::Result<bool> {
         if let UseTree::Path(p) = &i.tree
             && p.ident == "crate"
         {
             match &*p.tree {
-                UseTree::Name(n) => self.macro_file_map.contains_key(&n.ident),
-                UseTree::Rename(r) => self.macro_file_map.contains_key(&r.ident),
-                UseTree::Group(g) => {
-                    let mut res = None;
-                    for item in &g.items {
-                        let cur = match item {
-                            UseTree::Name(n) => self.macro_file_map.contains_key(&n.ident),
-                            UseTree::Rename(r) => self.macro_file_map.contains_key(&r.ident),
-                            _ => false,
-                        };
-                        assert!(
-                            res.is_none_or(|res| res == cur),
-                            "Can't have both macro and path in use statement"
-                        );
-                        res = Some(cur);
-                    }
-                    res.unwrap()
-                }
-                _ => false,
+                UseTree::Name(n) => Ok(self.macro_file_map.contains_key(&n.ident)),
+                UseTree::Rename(r) => Ok(self.macro_file_map.contains_key(&r.ident)),
+                UseTree::Group(g) => is_macro_group(&g.items, self.macro_file_map),
+                _ => Ok(false),
             }
         } else {
-            false
+            Ok(false)
+        }
+    }
+    /// Same as [`Self::is_macro_item_use`], recording the error for later
+    /// propagation since `Fold` cannot return one.
+    fn is_macro_item_use_or_record(&mut self, i: &ItemUse) -> bool {
+        match self.is_macro_item_use(i) {
+            Ok(res) => res,
+            Err(err) => {
+                self.errors.push(err);
+                false
+            }
         }
     }
     fn is_macro_path(&self, i: &syn::Path) -> bool {
@@ -142,7 +170,7 @@ impl LibraryVisitor<'_> {
 
 impl Fold for LibraryVisitor<'_> {
     fn fold_item_use(&mut self, mut i: ItemUse) -> ItemUse {
-        if !self.is_macro_item_use(&i)
+        if !self.is_macro_item_use_or_record(&i)
             && let UseTree::Path(mut p) = i.tree
         {
             i.tree = if p.ident == "crate" {
@@ -161,11 +189,15 @@ impl Fold for LibraryVisitor<'_> {
     }
 
     fn fold_path(&mut self, mut i: syn::Path) -> syn::Path {
-        if !self.is_macro_path(&i) && i.segments.first().unwrap().ident == "crate" {
+        let Some(first) = i.segments.first() else {
+            return i;
+        };
+        if !self.is_macro_path(&i) && first.ident == "crate" {
+            let sp = first.ident.span();
             i.segments.insert(
                 1,
                 PathSegment {
-                    ident: Ident::new(self.library_name, i.segments[0].ident.span()),
+                    ident: Ident::new(self.library_name, sp),
                     arguments: syn::PathArguments::None,
                 },
             );
@@ -221,20 +253,36 @@ impl Fold for LibraryVisitor<'_> {
                 result += "::";
                 result += &ident;
             }
-            i.mac.tokens = syn::parse_str(&result).unwrap();
+            match syn::parse_str(&result) {
+                Ok(tokens) => i.mac.tokens = tokens,
+                Err(err) => self.errors.push(anyhow::Error::new(err).context(format!(
+                    "failed to reparse rewritten body of macro `{}`",
+                    i.ident.as_ref().map(Ident::to_string).unwrap_or_default()
+                ))),
+            }
         }
         fold::fold_item_macro(self, i)
     }
 }
 
 fn get_module_path(file: &Path, library_path: &Path) -> anyhow::Result<Vec<String>> {
-    if file.file_name().unwrap() == "lib.rs" {
+    let name = file
+        .file_name()
+        .ok_or_else(|| anyhow!("`{}` is not a file path", file.display()))?;
+    if name == "lib.rs" {
         return Ok(Vec::new());
     }
     // assume library file
-    let mut file = file.strip_prefix(library_path)?.to_path_buf();
+    let file = file.strip_prefix(library_path).with_context(|| {
+        format!(
+            "`{}` is not inside library path `{}`",
+            file.display(),
+            library_path.display()
+        )
+    })?;
+    let mut file = file.to_path_buf();
     file.set_extension("");
-    if file.file_name().unwrap() == "mod" {
+    if file.file_name().is_some_and(|name| name == "mod") {
         file.pop();
     }
     Ok(file
@@ -252,12 +300,17 @@ pub fn gen_file(
     let mut content = String::new();
 
     // insert source
-    let mut file = syn::parse_file(&fs::read_to_string(source)?)?;
-    file = SourceVisitor {
+    let mut file = parse_file(source)?;
+    let mut visitor = SourceVisitor {
         library_name,
         macro_file_map,
-    }
-    .fold_file(file);
+        errors: Errors::default(),
+    };
+    file = visitor.fold_file(file);
+    visitor
+        .errors
+        .into_result()
+        .with_context(|| format!("failed to rewrite source `{}`", source.display()))?;
     content += &prettyplease::unparse(&file);
 
     // insert library files
@@ -277,12 +330,17 @@ pub fn gen_file(
         for module in &mods[cut..] {
             content += &format!("pub mod {module} {{");
         }
-        let mut src = syn::parse_file(&fs::read_to_string(file)?)?;
-        src = LibraryVisitor {
+        let mut src = parse_file(&file)?;
+        let mut visitor = LibraryVisitor {
             library_name,
             macro_file_map,
-        }
-        .fold_file(src);
+            errors: Errors::default(),
+        };
+        src = visitor.fold_file(src);
+        visitor
+            .errors
+            .into_result()
+            .with_context(|| format!("failed to rewrite library file `{}`", file.display()))?;
         content += &prettyplease::unparse(&src);
         pre = mods;
     }
@@ -292,7 +350,13 @@ pub fn gen_file(
     }
     content += "}";
 
-    content = prettyplease::unparse(&syn::parse_file(&content)?);
+    let parsed = syn::parse_file(&content)
+        .context("failed to parse the generated output, this is a bug in source-builder")?;
+    Ok(prettyplease::unparse(&parsed))
+}
 
-    Ok(content)
+fn parse_file(path: &Path) -> anyhow::Result<syn::File> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read `{}`", path.display()))?;
+    syn::parse_file(&contents).with_context(|| format!("failed to parse `{}`", path.display()))
 }
