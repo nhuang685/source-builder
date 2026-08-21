@@ -153,3 +153,6 @@ pub fn determine_files(
     vis.files.remove(&library_path.join("lib.rs"));
     Ok(vis.files)
 }
+
+#[cfg(test)]
+mod tests;

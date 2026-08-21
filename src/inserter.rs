@@ -296,3 +296,6 @@ pub fn gen_file(
 
     Ok(content)
 }
+
+#[cfg(test)]
+mod tests;

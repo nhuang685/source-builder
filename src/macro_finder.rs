@@ -37,3 +37,6 @@ pub fn precompute_macro_file_map(root: &PathBuf) -> Result<HashMap<Ident, PathBu
     }
     Ok(map)
 }
+
+#[cfg(test)]
+mod tests;
